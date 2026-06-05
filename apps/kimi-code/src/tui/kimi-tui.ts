@@ -1750,10 +1750,20 @@ export class KimiTUI {
 
   private async bootstrapFromPicker(): Promise<void> {
     await this.fetchSessions();
-    this.mountSessionPicker(() => {
-      this.hideSessionPicker();
-      void this.stop();
-    });
+    this.mountSessionPicker(
+      () => {
+        this.hideSessionPicker();
+        void this.stop();
+      },
+      {
+        onCtrlC: () => {
+          this.state.editor.onCtrlC?.();
+        },
+        onCtrlD: () => {
+          this.state.editor.onCtrlD?.();
+        },
+      },
+    );
   }
 
   hideSessionPicker(): void {
@@ -1761,7 +1771,10 @@ export class KimiTUI {
     this.restoreEditor();
   }
 
-  private mountSessionPicker(onCancel: () => void): void {
+  private mountSessionPicker(
+    onCancel: () => void,
+    shortcuts: { readonly onCtrlC?: () => void; readonly onCtrlD?: () => void } = {},
+  ): void {
     this.state.activeDialog = 'session-picker';
     this.mountEditorReplacement(
       new SessionPickerComponent({
@@ -1777,6 +1790,8 @@ export class KimiTUI {
           });
         },
         onCancel,
+        onCtrlC: shortcuts.onCtrlC,
+        onCtrlD: shortcuts.onCtrlD,
       }),
     );
   }
