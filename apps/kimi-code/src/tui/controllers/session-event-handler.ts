@@ -320,8 +320,15 @@ export class SessionEventHandler {
     this.host.streamingUI.flushNow();
     if (event.reason === 'cancelled') {
       this.markActiveAgentSwarmsCancelled();
-      void this.tryAutoUndo();
+      // tryAutoUndo runs the undo before finalizeTurn so queued messages
+      // cannot be dispatched while the cancelled prompt is still in context.
+      void this.tryAutoUndo(sendQueued);
+      return;
     }
+    this.finalizeTurnTail(sendQueued);
+  }
+
+  private finalizeTurnTail(sendQueued: (item: QueuedMessage) => void): void {
     const todos = this.host.state.todoPanel.getTodos();
     if (todos.length > 0 && todos.every((t) => t.status === 'done')) {
       this.host.streamingUI.setTodoList([]);
@@ -378,40 +385,44 @@ export class SessionEventHandler {
     this.subAgentEventHandler.markActiveAgentSwarmsCancelled();
   }
 
-  private async tryAutoUndo(): Promise<void> {
-    // Esc 与 Ctrl-C 在 kimi-code 中语义一致（都是用户主动中断），
-    // 是否自动撤回只取决于语义守卫：本轮尚无实质内容时才撤回。
+  private async tryAutoUndo(sendQueued: (item: QueuedMessage) => void): Promise<void> {
+    // Esc and Ctrl-C share the same "user interrupt" semantics in kimi-code.
+    // Whether to auto-undo depends solely on the semantic guard below.
     const { host } = this;
     const session = host.session;
-    if (session === undefined) return;
+    if (session === undefined) { this.finalizeTurnTail(sendQueued); return; }
 
-    // 语义守卫：本轮是否已产生实质内容（assistant 文字或 tool_call）
+    // Semantic guard: has this turn produced any substantial output?
+    // Check both transcript entries and live tool calls not yet written to transcript.
+    if (host.streamingUI.hasAnyActiveToolCall()) { this.finalizeTurnTail(sendQueued); return; }
     const entries = host.state.transcriptEntries;
     let promptText: string | undefined;
     for (let i = entries.length - 1; i >= 0; i--) {
       const e = entries[i];
       if (e === undefined) continue;
       if (e.kind === 'user') { promptText = e.content; break; }
-      if (e.kind === 'assistant' && e.content.trim().length > 0) return;
-      if (e.kind === 'tool_call') return;
+      if (e.kind === 'assistant') { this.finalizeTurnTail(sendQueued); return; }
+      if (e.kind === 'tool_call') { this.finalizeTurnTail(sendQueued); return; }
     }
-    if (promptText === undefined) return;
+    if (promptText === undefined) { this.finalizeTurnTail(sendQueued); return; }
 
-    // 执行撤回
+    // Withdraw the prompt before finalizing so queued messages cannot be
+    // dispatched while the cancelled prompt is still in context.
     try {
       await session.undoHistory(1);
     } catch {
-      return; // 触及 compaction boundary，静默放弃
+      this.finalizeTurnTail(sendQueued); return; // hit compaction boundary
     }
 
     applyUndoToTranscriptState(host as UndoTranscriptHost, 1);
 
-    // 回填文字
+    // Restore the prompt text to the editor.
     if (promptText.length > 0) {
       host.state.editor.setText(promptText);
       host.updateEditorBorderHighlight(promptText);
-      host.state.ui.requestRender();
     }
+
+    this.finalizeTurnTail(sendQueued);
   }
 
   private isAnthropicSessionActive(): boolean {
