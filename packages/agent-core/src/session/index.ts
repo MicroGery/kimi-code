@@ -76,6 +76,7 @@ export interface AgentMeta {
   readonly homedir: string;
   readonly type: AgentType;
   readonly parentAgentId: string | null;
+  readonly swarmItem?: string;
 }
 
 interface ResumedAgent {
@@ -88,6 +89,7 @@ type AgentEntry = Agent | Promise<ResumedAgent>;
 export interface CreateAgentOptions {
   readonly profile?: ResolvedAgentProfile;
   readonly parentAgentId?: string;
+  readonly swarmItem?: string;
   readonly persistMetadata?: boolean;
 }
 
@@ -166,7 +168,10 @@ export class Session {
       },
       telemetry: this.telemetry,
     });
-    this.skills = new SkillRegistry({ sessionId: options.id });
+    this.skills = new SkillRegistry({
+      sessionId: options.id,
+      experimentalFlags: this.experimentalFlags,
+    });
     this.mcp = new McpConnectionManager({
       oauthService: new McpOAuthService({ kimiHomeDir: options.kimiHomeDir }),
       log: this.log,
@@ -292,6 +297,7 @@ export class Session {
         homedir,
         type,
         parentAgentId,
+        swarmItem: options.swarmItem,
       };
       void this.writeMetadata();
     }
@@ -326,12 +332,12 @@ export class Session {
     const mainAgent = this.requireMainAgent();
 
     try {
-      const handle = await mainAgent.subagentHost!.spawn('coder', {
+      const handle = await mainAgent.subagentHost!.spawn({
+        profileName: 'coder',
         parentToolCallId: 'generate-agents-md',
         prompt: DEFAULT_INIT_PROMPT,
         description: 'Initialize AGENTS.md',
         runInBackground: false,
-        origin: { kind: 'system_trigger', name: 'init' },
         signal: new AbortController().signal,
       });
       await handle.completion;
@@ -402,7 +408,7 @@ export class Session {
       builtinDir: this.options.skills?.builtinDir,
     });
     await this.skills.loadRoots(roots);
-    registerBuiltinSkills(this.skills);
+    registerBuiltinSkills(this.skills, { experimentalFlags: this.experimentalFlags });
   }
 
   private async loadMcpServers(): Promise<void> {
@@ -456,11 +462,6 @@ export class Session {
     });
   }
 
-  private backgroundTaskTimeoutMs(): number | undefined {
-    const timeoutS = this.options.background?.agentTaskTimeoutS;
-    return timeoutS === undefined ? undefined : timeoutS * 1000;
-  }
-
   private refreshAgentBuiltinTools(): void {
     for (const agent of this.readyAgents()) {
       if (!agent.config.hasProvider) continue;
@@ -488,8 +489,7 @@ export class Session {
       rpc: proxyWithExtraPayload(this.rpc, { agentId: id }),
       modelProvider: this.options.providerManager,
       hookEngine: config.hookEngine ?? this.hookEngine,
-      subagentHost:
-        config.subagentHost ?? new SessionSubagentHost(this, id, this.backgroundTaskTimeoutMs()),
+      subagentHost: config.subagentHost ?? new SessionSubagentHost(this, id),
       mcp: this.mcp,
       goals: this.goals,
       permission: this.permissionOptions(parentAgentId, config.permission),
