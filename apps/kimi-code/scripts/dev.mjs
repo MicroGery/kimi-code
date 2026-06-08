@@ -28,6 +28,7 @@ const child = spawn(
     cwd: APP_ROOT,
     env,
     stdio: 'inherit',
+    shell: process.platform === 'win32',
   },
 );
 
