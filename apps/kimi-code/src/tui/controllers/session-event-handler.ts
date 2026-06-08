@@ -83,6 +83,8 @@ import type {
 } from '../types';
 import type { TUIState } from '../tui-state';
 import { createGoal as startGoalCommand } from '../commands/goal';
+import { applyUndoToTranscriptState } from '../commands/undo';
+import type { UndoTranscriptHost } from '../commands/undo';
 
 export interface SessionEventHost {
   state: TUIState;
@@ -110,6 +112,7 @@ export interface SessionEventHost {
   shiftQueuedMessage(): QueuedMessage | undefined;
   readonly btwPanelController: BtwPanelController;
   readonly tasksBrowserController: TasksBrowserController;
+  updateEditorBorderHighlight(text?: string): void;
 }
 
 export class SessionEventHandler {
@@ -317,6 +320,7 @@ export class SessionEventHandler {
     this.host.streamingUI.flushNow();
     if (event.reason === 'cancelled') {
       this.markActiveAgentSwarmsCancelled();
+      void this.tryAutoUndo();
     }
     const todos = this.host.state.todoPanel.getTodos();
     if (todos.length > 0 && todos.every((t) => t.status === 'done')) {
@@ -372,6 +376,42 @@ export class SessionEventHandler {
 
   private markActiveAgentSwarmsCancelled(): void {
     this.subAgentEventHandler.markActiveAgentSwarmsCancelled();
+  }
+
+  private async tryAutoUndo(): Promise<void> {
+    // Esc 与 Ctrl-C 在 kimi-code 中语义一致（都是用户主动中断），
+    // 是否自动撤回只取决于语义守卫：本轮尚无实质内容时才撤回。
+    const { host } = this;
+    const session = host.session;
+    if (session === undefined) return;
+
+    // 语义守卫：本轮是否已产生实质内容（assistant 文字或 tool_call）
+    const entries = host.state.transcriptEntries;
+    let promptText: string | undefined;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e === undefined) continue;
+      if (e.kind === 'user') { promptText = e.content; break; }
+      if (e.kind === 'assistant' && e.content.trim().length > 0) return;
+      if (e.kind === 'tool_call') return;
+    }
+    if (promptText === undefined) return;
+
+    // 执行撤回
+    try {
+      await session.undoHistory(1);
+    } catch {
+      return; // 触及 compaction boundary，静默放弃
+    }
+
+    applyUndoToTranscriptState(host as UndoTranscriptHost, 1);
+
+    // 回填文字
+    if (promptText.length > 0) {
+      host.state.editor.setText(promptText);
+      host.updateEditorBorderHighlight(promptText);
+      host.state.ui.requestRender();
+    }
   }
 
   private isAnthropicSessionActive(): boolean {
